@@ -123,13 +123,26 @@ jobs:
             Write-Output "volume $($_.DriveLetter): free $([math]::Round($_.SizeRemaining / 1GB, 1)) GB"
           }
 
+      - name: List the built artifacts
+        if: always()
+        shell: pwsh
+        run: |
+          $dir = 'apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts'
+          if (-not (Test-Path $dir)) { Write-Output "no artifact directory at $dir"; exit 0 }
+          Get-ChildItem $dir | ForEach-Object {
+            if ($_.PSIsContainer) { Write-Output "$($_.Name)/ (directory)" }
+            else { Write-Output "$($_.Name) $([math]::Round($_.Length / 1MB, 2)) MB" }
+          }
+
+      # electron-builder writes the installer before the packaged-runtime smoke runs, so the
+      # artifact is captured even when that smoke fails the run.
       - name: Upload the installer
-        if: inputs.mode == 'package' && success()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: deepseek-harness-win-x64-unsigned
-          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/**
-          if-no-files-found: error
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/*
+          if-no-files-found: warn
           retention-days: 14
 
       - name: Upload the packaging record
