@@ -1,0 +1,139 @@
+# Local unsigned Windows installer builds for a fork. The upstream repository
+# packages Desktop releases from a supervised release host with an EV token and
+# COS credentials, so this workflow deliberately stops at the unsigned NSIS
+# artifact: no signing credentials, no update feed, no upload.
+name: Desktop (Windows, unsigned)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: check validates configuration and toolchain only; package builds the installer
+        required: true
+        default: check
+        type: choice
+        options:
+          - check
+          - package
+      runner:
+        description: Runner label; use a larger Windows runner when one is available
+        required: true
+        default: windows-2022
+        type: string
+      policy_origin:
+        description: HTTPS origin embedded as the mandatory-update policy origin (test deployment)
+        required: true
+        default: https://example.com
+        type: string
+      build_version:
+        description: Optional build version, for example 0.1.7-rc.2.20260218.1; empty publishes the product version
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PRIMARY_NODE_VERSION: '24'
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  windows-unsigned:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Report build host
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          Write-Output "cpu: $($cpu.Name) / cores $($cpu.NumberOfCores) / logical $($cpu.NumberOfLogicalProcessors)"
+          Write-Output "ram GB: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB, 1))"
+          Get-Volume | Where-Object DriveLetter | ForEach-Object {
+            Write-Output "volume $($_.DriveLetter): $($_.FileSystem) free $([math]::Round($_.SizeRemaining / 1GB, 1)) GB"
+          }
+          $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $vswhere = Join-Path $pf86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          Write-Output "vswhere: $(Test-Path $vswhere)"
+          if (Test-Path $vswhere) {
+            Write-Output "vswhere without VC tools: $(& $vswhere -latest -products * -property installationPath)"
+            Write-Output "vswhere with VC tools: $(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)"
+          }
+          Write-Output "python: $((python --version 2>&1) -join ' ')"
+          Write-Output "python path: $((Get-Command python -ErrorAction SilentlyContinue).Source)"
+          Write-Output "tar: $((tar --version 2>&1 | Select-Object -First 1))"
+
+      - name: Configure runner-private caches
+        shell: pwsh
+        run: |
+          "NODE_COMPILE_CACHE=${{ runner.temp }}/node-compile-cache" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "npm_config_devdir=${{ runner.temp }}/node-gyp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=${{ runner.temp }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TEMP=${{ runner.temp }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.PRIMARY_NODE_VERSION }}
+          package-manager-cache: false
+
+      - name: Install (immutable)
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Write the local release settings
+        shell: pwsh
+        run: |
+          $origin = '${{ inputs.policy_origin }}'
+          $lines = @(
+            'DSH_DESKTOP_APP_ID=com.deepseek.harness'
+            'DSH_DESKTOP_AUTO_UPDATE_ENV=test'
+            "DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=$origin"
+            'DSH_DESKTOP_MANDATORY_UPDATE_CONFIG=''{"allowedAuthOrigins":["' + $origin + '"]}'''
+            'DSH_DESKTOP_NPM_REGISTRY=https://registry.npmmirror.com'
+          )
+          $lines -join "`n" | Out-File -FilePath apps/desktop/.env.windows -Encoding utf8 -NoNewline
+
+      - name: Validate configuration and toolchain
+        shell: pwsh
+        run: pnpm --dir apps/desktop run check:package -- --unsigned
+
+      - name: Package the unsigned installer
+        if: inputs.mode == 'package' && inputs.build_version == ''
+        shell: pwsh
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: Package the unsigned installer under a build version
+        if: inputs.mode == 'package' && inputs.build_version != ''
+        shell: pwsh
+        run: pnpm run package:desktop:win:x64:unsigned -- --build-version "${{ inputs.build_version }}"
+
+      - name: Report free space after packaging
+        if: always()
+        shell: pwsh
+        run: Get-Volume | Where-Object DriveLetter | ForEach-Object { Write-Output "volume $($_.DriveLetter): free $([math]::Round($_.SizeRemaining / 1GB, 1)) GB" }
+
+      - name: Upload the installer
+        if: inputs.mode == 'package' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deepseek-harness-win-x64-unsigned
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload the packaging record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-packaging-runs
+          path: apps/desktop/.desktop-build/packaging-runs/**
+          if-no-files-found: ignore
+          retention-days: 7
