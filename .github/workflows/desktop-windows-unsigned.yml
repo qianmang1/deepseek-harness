@@ -118,7 +118,10 @@ jobs:
       - name: Report free space after packaging
         if: always()
         shell: pwsh
-        run: Get-Volume | Where-Object DriveLetter | ForEach-Object { Write-Output "volume $($_.DriveLetter): free $([math]::Round($_.SizeRemaining / 1GB, 1)) GB" }
+        run: |
+          Get-Volume | Where-Object DriveLetter | ForEach-Object {
+            Write-Output "volume $($_.DriveLetter): free $([math]::Round($_.SizeRemaining / 1GB, 1)) GB"
+          }
 
       - name: Upload the installer
         if: inputs.mode == 'package' && success()
